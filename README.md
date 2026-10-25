@@ -30,192 +30,146 @@ Google Colab with NVCC Compiler
 
 ## PROGRAM:
 ```
-%%writefile vector_add.cu
-#include <cuda_runtime.h>
+```cpp
+%%cuda
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <time.h>
-#include <sys/time.h>
-#include <stdbool.h>
+#include <cuda_runtime.h>
 
-// CUDA error checking macro
-#define CHECK(call)                                                   \
-{                                                                     \
-    const cudaError_t error = call;                                   \
-    if (error != cudaSuccess)                                         \
-    {                                                                 \
-        fprintf(stderr, "Error: %s:%d, ", __FILE__, __LINE__);        \
-        fprintf(stderr, "code: %d, reason: %s\n",                    \
-                error, cudaGetErrorString(error));                    \
-        exit(1);                                                      \
-    }                                                                 \
-}
+#define N (1 << 24)
+#define REPEAT 10
 
-// Timer function
-double seconds()
+// Kernel: Each thread processes two elements
+__global__ void sumArraysOnGPU2(float *A, float *B,
+                                float *C, int n)
 {
-    struct timeval tp;
-    gettimeofday(&tp, NULL);
-    return ((double)tp.tv_sec + (double)tp.tv_usec * 1.0e-6);
-}
+    int i = (blockIdx.x * blockDim.x + threadIdx.x) * 2;
 
-// Compare CPU and GPU results
-void checkResult(float *hostRef, float *gpuRef, const int N)
-{
-    double epsilon = 1.0E-5;
-    bool match = true;
-
-    for (int i = 0; i < N; i++)
-    {
-        if (fabs(hostRef[i] - gpuRef[i]) > epsilon)
-        {
-            match = false;
-            printf("Arrays do not match!\n");
-            printf("host %f gpu %f at index %d\n",
-                   hostRef[i], gpuRef[i], i);
-            break;
-        }
-    }
-
-    if (match)
-        printf("Arrays match.\n");
-}
-
-// Initialize array with random values
-void initialData(float *ip, int size)
-{
-    for (int i = 0; i < size; i++)
-    {
-        ip[i] = (float)(rand() & 0xFF) / 10.0f;
-    }
-}
-
-// CPU vector addition
-void sumArraysOnHost(float *A, float *B, float *C, const int N)
-{
-    for (int i = 0; i < N; i++)
-    {
+    if (i < n)
         C[i] = A[i] + B[i];
-    }
-}
 
-// GPU kernel
-__global__ void sumArraysOnGPU(
-    float *A, float *B, float *C, const int N)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (i < N)
-    {
-        C[i] = A[i] + B[i];
-    }
+    if (i + 1 < n)
+        C[i + 1] = A[i + 1] + B[i + 1];
 }
 
 int main()
 {
-    printf("CUDA Vector Addition Starting...\n");
-
-    // Select GPU
     int dev = 0;
-    cudaDeviceProp deviceProp;
-    CHECK(cudaGetDeviceProperties(&deviceProp, dev));
-    CHECK(cudaSetDevice(dev));
+    cudaSetDevice(dev);
 
-    printf("Using Device %d: %s\n", dev, deviceProp.name);
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, dev);
 
-    // Vector size
-    int nElem = 1 << 24;
-    printf("Vector size %d\n", nElem);
+    printf("GPU-Based Vector Summation\n");
+    printf("Device: %s\n", prop.name);
+    printf("Vector size: %d\n\n", N);
 
-    size_t nBytes = (size_t)nElem * sizeof(float);
+    size_t bytes = (size_t)N * sizeof(float);
 
     // Allocate host memory
-    float *h_A = (float *)malloc(nBytes);
-    float *h_B = (float *)malloc(nBytes);
-    float *hostRef = (float *)malloc(nBytes);
-    float *gpuRef = (float *)malloc(nBytes);
+    float *h_A = (float *)malloc(bytes);
+    float *h_B = (float *)malloc(bytes);
+    float *h_C = (float *)malloc(bytes);
 
-    if (!h_A || !h_B || !hostRef || !gpuRef)
+    if (!h_A || !h_B || !h_C)
     {
-        fprintf(stderr, "Host memory allocation failed!\n");
-        free(h_A);
-        free(h_B);
-        free(hostRef);
-        free(gpuRef);
+        printf("Host memory allocation failed\n");
         return 1;
     }
 
-    double iStart, iElaps;
-
-    // Initialize input data
-    srand((unsigned)time(NULL));
-
-    iStart = seconds();
-    initialData(h_A, nElem);
-    initialData(h_B, nElem);
-    iElaps = seconds() - iStart;
-    printf("initialData Time elapsed %f sec\n", iElaps);
-
-    memset(hostRef, 0, nBytes);
-    memset(gpuRef, 0, nBytes);
-
-    // CPU computation
-    iStart = seconds();
-    sumArraysOnHost(h_A, h_B, hostRef, nElem);
-    iElaps = seconds() - iStart;
-    printf("sumArraysOnHost Time elapsed %f sec\n", iElaps);
+    // Initialize arrays
+    for (int i = 0; i < N; i++)
+    {
+        h_A[i] = (float)(i % 100);
+        h_B[i] = (float)((i + 1) % 100);
+    }
 
     // Allocate GPU memory
     float *d_A, *d_B, *d_C;
-    CHECK(cudaMalloc((void **)&d_A, nBytes));
-    CHECK(cudaMalloc((void **)&d_B, nBytes));
-    CHECK(cudaMalloc((void **)&d_C, nBytes));
 
-    // Copy input data from host to GPU
-    CHECK(cudaMemcpy(d_A, h_A, nBytes, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_B, h_B, nBytes, cudaMemcpyHostToDevice));
+    cudaMalloc((void **)&d_A, bytes);
+    cudaMalloc((void **)&d_B, bytes);
+    cudaMalloc((void **)&d_C, bytes);
 
-    // Kernel launch configuration
-    int threads = 512;
-    dim3 block(threads);
-    dim3 grid((nElem + block.x - 1) / block.x);
+    // Copy input arrays to GPU
+    cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
 
-    // GPU computation
-    iStart = seconds();
-    sumArraysOnGPU<<<grid, block>>>(d_A, d_B, d_C, nElem);
-    CHECK(cudaGetLastError());
-    CHECK(cudaDeviceSynchronize());
-    iElaps = seconds() - iStart;
+    // Configuration: 256 threads per block
+    int threads = 256;
+    int gridSize = (N + 2 * threads - 1) / (2 * threads);
 
-    printf("sumArraysOnGPU <<< %d, %d >>> Time elapsed %f sec\n",
-           grid.x, block.x, iElaps);
+    printf("EXPERIMENT 2: Two elements per thread\n");
+    printf("Block.x = %d\n", threads);
+    printf("Grid.x = %d\n", gridSize);
 
-    // Copy result from GPU to host
-    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
+    // Warm-up
+    sumArraysOnGPU2<<<gridSize, threads>>>(d_A, d_B, d_C, N);
+    cudaDeviceSynchronize();
+
+    // Measure kernel execution time
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+
+    for (int r = 0; r < REPEAT; r++)
+    {
+        sumArraysOnGPU2<<<gridSize, threads>>>(d_A, d_B, d_C, N);
+    }
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float ms;
+    cudaEventElapsedTime(&ms, start, stop);
+
+    printf("Time elapsed %.6f ms\n", ms / REPEAT);
+
+    // Copy result back to host
+    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
 
     // Verify results
-    checkResult(hostRef, gpuRef, nElem);
+    int correct = 1;
+
+    for (int i = 0; i < N; i++)
+    {
+        if (h_C[i] != h_A[i] + h_B[i])
+        {
+            correct = 0;
+            printf("Mismatch at index %d\n", i);
+            break;
+        }
+    }
+
+    printf("\nVerification: %s\n",
+           correct ? "SUCCESS" : "FAILED");
 
     // Free GPU memory
-    CHECK(cudaFree(d_A));
-    CHECK(cudaFree(d_B));
-    CHECK(cudaFree(d_C));
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
 
     // Free host memory
     free(h_A);
     free(h_B);
-    free(hostRef);
-    free(gpuRef);
+    free(h_C);
 
-    return 0;
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    cudaDeviceReset();
+
+    return correct ? 0 : 1;
 }
+```
 ```
 
 ## OUTPUT:
 
-<img width="797" height="242" alt="image" src="https://github.com/user-attachments/assets/f2f73a36-04a2-4fa5-82c2-37ab4ce0c209" />
+<img width="653" height="220" alt="image" src="https://github.com/user-attachments/assets/95e7c859-3fbb-47c8-a8a3-02bc8137c194" />
+
 
 
 ## RESULT:
